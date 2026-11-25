@@ -1,6 +1,6 @@
 name: auth_engine
 description: The auth state machine both apps run, with its Firebase identity gateway.
-version: 0.1.0
+version: 0.2.0
 publish_to: none
 
 environment:
@@ -11,6 +11,8 @@ dependencies:
   flutter:
     sdk: flutter
   firebase_auth: ^7.0.1
+  firebase_messaging: ^17.0.1
+  google_sign_in: ^7.2.0
 
 dev_dependencies:
   flutter_test:

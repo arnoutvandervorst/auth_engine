@@ -9,6 +9,11 @@ The auth state machine that the apps both run, so a fix lands once.
 - `FirebaseIdentityGateway` (`lib/src/firebase_identity_gateway.dart`): the
   Firebase side of identity. An app passes `ensureGuestDoc` (its own backend
   call) and optionally `onAnonymousSignInFailed`.
+- `AuthError`, `AuthException` (`lib/src/auth_error.dart`): why a step failed. The app gives each value its words.
+- `AuthService<T, U>` and `FirebaseAuthService<U>` (`lib/src/auth_service.dart`,
+  `firebase_auth_service.dart`): sign-in, sign-up, linking and phone for
+  e-mail, Google, Apple and SMS, native and web. An app passes its user
+  documents as `AuthAccounts<U>`, plus its language, log and failure report.
 - `package:auth_engine/testing.dart`: `FakeIdentity`, `FakeProfiles`, `pump`.
 
 The profile gateway stays in each app: it projects that app's user document
@@ -21,7 +26,7 @@ dependencies:
   auth_engine:
     git:
       url: https://github.com/<owner>/auth_engine.git
-      ref: v0.1.0
+      ref: v0.2.0
 ```
 
 A fix here reaches an app when that app raises `ref`.
