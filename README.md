@@ -1,6 +1,6 @@
 # auth_engine
 
-The auth state machine that the apps both run, so a fix lands once.
+An auth state machine for Flutter + Firebase apps, kept in one place so a fix lands once.
 
 - `AuthEngine` (`lib/src/auth_engine.dart`): the orchestrator. Every state
   transition is synchronous; async work arrives as facts keyed by uid.
@@ -32,7 +32,7 @@ dependencies:
   auth_engine:
     git:
       url: https://github.com/<owner>/auth_engine.git
-      ref: v0.3.2
+      ref: v0.3.3
 ```
 
 A fix here reaches an app when that app raises `ref`.

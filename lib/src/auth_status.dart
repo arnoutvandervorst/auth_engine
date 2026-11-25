@@ -165,7 +165,7 @@ class AuthStatus {
       //* locked out of. Browsing and voting must not wait on Firestore.
       GuestSession() => AuthGate.anonymous,
       //* An unverified email is a NUDGE, not a wall: a password sign-up used
-      //* to land here instead of onboarding, unmounting the deck the guest
+      //* to land here instead of onboarding, unmounting the page the guest
       //* had been voting on until the mailbox round-trip. See
       //* [needsEmailVerification].
       AccountSession() => _stageGate(),
@@ -173,7 +173,7 @@ class AuthStatus {
   }
 
   /// A password account whose address is still unverified. Rendered as a
-  /// banner above the deck; it never gates anything.
+  /// banner above the content; it never gates anything.
   bool get needsEmailVerification => switch (session) {
     AccountSession(:final mustVerifyEmail, :final emailVerified) => mustVerifyEmail && !emailVerified,
     _ => false,

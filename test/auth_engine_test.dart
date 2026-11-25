@@ -766,7 +766,7 @@ void main() {
     test('a guest whose document never landed gets one more ensure after the round, and on the next tick', () async {
       //* Both ensure attempts inside the round failed silently (the round
       //* itself does not throw on a missing doc) — the install used to rest
-      //* here with a working-looking app and a permanently empty deck.
+      //* here with a working-looking app and a permanently empty home.
       profiles.store.clear();
       identity.emit(const NoneSession());
       await engine.ready;

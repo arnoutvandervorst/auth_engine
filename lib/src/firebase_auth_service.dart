@@ -87,7 +87,7 @@ class FirebaseAuthService<U> implements AuthService<User, U> {
     }
 
     //* A linked GUEST: take the provider back off and keep the guest session
-    //* (its uid, doc and deck). Deleting would sign the person out of the
+    //* (its uid, document and data). Deleting would sign the person out of the
     //* only account they had.
     if (unlinkProviderId != null) {
       try {
@@ -174,7 +174,7 @@ class FirebaseAuthService<U> implements AuthService<User, U> {
     var completed = false;
     //* The guest this sign-in links onto (same uid after the link). A failure
     //* then unlinks the phone instead of deleting the guest account with its
-    //* coins, deck and votes (audit #22). Taken from the uid, not from the
+    //* data. Taken from the uid, not from the
     //* doc read, so a network failure on that read is covered too.
     final current = _firebaseAuth.currentUser;
     final guestUid = current != null && current.isAnonymous ? current.uid : null;
@@ -182,7 +182,7 @@ class FirebaseAuthService<U> implements AuthService<User, U> {
 
     try {
       //* Like every other provider: a guest session LINKS, so the uid — and
-      //* the deck the guest was voting on — survives. A plain sign-in here
+      //* what the guest was doing — survives. A plain sign-in here
       //* switched uid and abandoned the guest's stack; the returning-account
       //* case (credential already in use) still falls back to sign-in.
       //* The web has no guest: it confirms the code sent by [verifyPhoneNumber].
@@ -292,7 +292,7 @@ class FirebaseAuthService<U> implements AuthService<User, U> {
     var completed = false;
     //* Set when the sign-in LINKED a guest (its ANONYMOUS doc sits under
     //* this uid): a failure then undoes the link instead of deleting the
-    //* account — deleting would throw the guest's session and deck away.
+    //* account — deleting would throw the guest's session and data away.
     String? linkedGuestProvider;
 
     try {
@@ -367,7 +367,7 @@ class FirebaseAuthService<U> implements AuthService<User, U> {
     var completed = false;
     //* Set when the sign-in LINKED a guest (its ANONYMOUS doc sits under
     //* this uid): a failure then undoes the link instead of deleting the
-    //* account — deleting would throw the guest's session and deck away.
+    //* account — deleting would throw the guest's session and data away.
     String? linkedGuestProvider;
 
     try {
@@ -444,8 +444,8 @@ class FirebaseAuthService<U> implements AuthService<User, U> {
   Future<U> createUserWithEmailAndPassword({required String email, required String password}) async {
     //* Convert the guest in place: if the current session is the auto-created
     //* anonymous user, link email/password to it instead of creating a fresh
-    //* account. This keeps the same uid — and therefore the seeded "taste"
-    //* snaps and any guest interactions — through onboarding. The social
+    //* account. This keeps the same uid — and therefore any guest
+    //* interactions — through onboarding. The social
     //* (Google/Apple) and phone sign-up paths already link; this brings email
     //* in line.
     final currentUser = _firebaseAuth.currentUser;
@@ -565,7 +565,7 @@ class FirebaseAuthService<U> implements AuthService<User, U> {
   /// - If the LINK fails (e.g. email already in use), the anonymous session is
   ///   left untouched — we only surface the error, never take over an account.
   /// - If a step AFTER a successful link fails, the email is unlinked again so
-  ///   the guest keeps its uid, doc, coins and deck (audit #22; deleting the
+  ///   the guest keeps its uid, document and data (deleting the
   ///   account threw all of that away on a network error).
   Future<U> _upgradeAnonymousWithEmail(User anonUser, String email, String password) async {
     //* Collision guard before touching auth — never link an email that already

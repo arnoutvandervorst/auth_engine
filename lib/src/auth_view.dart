@@ -96,7 +96,7 @@ class AuthView {
       return session is engine.AccountSession ? session.email : null;
     }, options: ComputedOptions(name: 'AuthView.unverifiedEmail'));
 
-    /// Whether to show the verify-your-email banner above the deck.
+    /// Whether to show the verify-your-email banner.
     needsEmailVerification = computed(() {
       return _status.value.needsEmailVerification;
     }, options: ComputedOptions(name: 'AuthView.needsEmailVerification'));

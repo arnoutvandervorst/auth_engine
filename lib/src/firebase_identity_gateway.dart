@@ -77,7 +77,7 @@ class FirebaseIdentityGateway implements IdentityGateway {
   ///
   //* A sign-out that lands while an anonymous sign-in is in flight leaves the
   //* Dart side showing a guest the native SDK already signed out (found by
-  //* Android release gate, 2026-11-25): its token read answers `no-current-user`.
+  //* an Android release gate, 2026-11-25): its token read answers `no-current-user`.
   //* Adopting that guest would give an app that looks signed in and is
   //* refused by every rule. Any other answer (a token, a network error, a
   //* slow read) leaves the guest in place.

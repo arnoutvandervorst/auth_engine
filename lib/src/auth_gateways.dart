@@ -3,7 +3,7 @@ import 'package:auth_engine/src/auth_status.dart';
 /// The two seams between the auth engine and the world.
 ///
 //* Two, and deliberately no third for side effects. The current notifier
-//* reaches into the snap composer, the app badge, analytics — which is how
+//* reaches into a composer, the app badge, analytics — which is how
 //* auth came to transitively depend on half the app, and why constructing it
 //* in a test touches live SDKs. Here those concerns simply do not exist:
 //* sign-out cleanup belongs to whoever calls `signOut`, at the call site.
@@ -29,7 +29,7 @@ abstract interface class IdentityGateway {
   /// Re-ask the backend for the guest `/users` document. Idempotent. The
   /// engine calls it when a guest session has no document after the sign-in
   /// round — a double failure of the ensure call used to be terminal for
-  /// that install (empty deck for the guest's whole life, no error).
+  /// that install (no content for the guest's whole life, no error).
   Future<void> ensureGuestDoc();
 }
 
