@@ -8,7 +8,9 @@ import 'package:auth_engine/src/auth_flows.dart';
 /// bracket and the loader semantics apply uniformly. Maps error codes
 /// to typed [AuthError] values so the UI can put them in its own words.
 class PhoneLoginState {
-  final AuthFlowsCore<Object?> _flows;
+  //* A getter, not the flows themselves: an app's flows are a global that
+  //* wakes Firebase on first touch, and showing the form must not do that.
+  final AuthFlowsCore<Object?> Function() _flows;
 
   final phoneNumber = Signal<String>('', options: SignalOptions(name: 'PhoneLoginState.phoneNumber'));
   final smsCode = Signal<String>('', options: SignalOptions(name: 'PhoneLoginState.smsCode'));
@@ -38,7 +40,7 @@ class PhoneLoginState {
     isLoading.value = true;
     errorAuthError.value = null;
 
-    await _flows.startPhoneVerification(
+    await _flows().startPhoneVerification(
       phoneNumber: number,
       codeSent: (id, token) {
         verificationId.value = id;
@@ -71,7 +73,7 @@ class PhoneLoginState {
 
     try {
       //* Failure is form-local: the returned error renders on the OTP step.
-      errorAuthError.value = await _flows.signInWithPhone(verificationId: id, smsCode: code);
+      errorAuthError.value = await _flows().signInWithPhone(verificationId: id, smsCode: code);
     } finally {
       //* The page may have closed while the code was checked.
       if (!isLoading.disposed) isLoading.value = false;
