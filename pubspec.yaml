@@ -1,6 +1,6 @@
 name: auth_engine
 description: An auth state machine for Flutter + Firebase apps, with its Firebase gateways and flows.
-version: 0.3.3
+version: 0.3.4
 publish_to: none
 
 environment:

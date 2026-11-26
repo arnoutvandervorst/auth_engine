@@ -42,15 +42,16 @@ class PhoneLoginState {
 
     await _flows().startPhoneVerification(
       phoneNumber: number,
+      //* The page may have closed while the code was sent: no writes after dispose.
       codeSent: (id, token) {
-        verificationId.value = id;
-        resendToken.value = token;
-        isLoading.value = false;
+        _set(verificationId, id);
+        _set(resendToken, token);
+        _set(isLoading, false);
       },
       verificationFailed: (error) {
-        errorAuthError.value = error;
-        verificationId.value = null;
-        isLoading.value = false;
+        _set(errorAuthError, error);
+        _set(verificationId, null);
+        _set(isLoading, false);
       },
     );
   }
@@ -73,10 +74,10 @@ class PhoneLoginState {
 
     try {
       //* Failure is form-local: the returned error renders on the OTP step.
-      errorAuthError.value = await _flows().signInWithPhone(verificationId: id, smsCode: code);
+      _set(errorAuthError, await _flows().signInWithPhone(verificationId: id, smsCode: code));
     } finally {
       //* The page may have closed while the code was checked.
-      if (!isLoading.disposed) isLoading.value = false;
+      _set(isLoading, false);
     }
   }
 
@@ -86,6 +87,11 @@ class PhoneLoginState {
     resendToken.value = null;
     smsCode.value = '';
     errorAuthError.value = null;
+  }
+
+  /// Writes [value] unless the state was disposed (the page closed mid-flow).
+  void _set<T>(Signal<T> signal, T value) {
+    if (!signal.disposed) signal.value = value;
   }
 
   void dispose() {

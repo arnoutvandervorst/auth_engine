@@ -2,6 +2,10 @@
 
 All notable changes to this package. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the package uses [semantic versioning](https://semver.org/) (pre-1.0: a minor bump may break the API). Each version is a git tag (`vX.Y.Z`) with a GitHub release.
 
+## [0.3.4] - 2026-11-26
+### Fixed
+- `PhoneLoginState` writes nothing after `dispose`: a page closed while the code was being sent or checked no longer sets `verificationId`, `resendToken`, `errorAuthError` or `isLoading` on disposed signals.
+
 ## [0.3.3] - 2026-11-25
 ### Changed
 - App-neutral wording in the docs and comments.
@@ -26,6 +30,7 @@ All notable changes to this package. The format follows [Keep a Changelog](https
 ### Added
 - The auth engine, its values and gateways, and the Firebase identity gateway.
 
+[0.3.4]: https://github.com/arnoutvandervorst/auth_engine/releases/tag/v0.3.4
 [0.3.3]: https://github.com/arnoutvandervorst/auth_engine/releases/tag/v0.3.3
 [0.3.2]: https://github.com/arnoutvandervorst/auth_engine/releases/tag/v0.3.2
 [0.3.1]: https://github.com/arnoutvandervorst/auth_engine/commits/v0.3.2
