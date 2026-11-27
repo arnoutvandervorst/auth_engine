@@ -48,6 +48,12 @@ class PhoneLoginState {
         _set(resendToken, token);
         _set(isLoading, false);
       },
+      //* Android verified the number without a code: no code step follows.
+      verificationCompleted: (credential) async {
+        final error = await _flows().signInWithVerifiedPhone(credential);
+        _set(errorAuthError, error);
+        _set(isLoading, false);
+      },
       verificationFailed: (error) {
         _set(errorAuthError, error);
         _set(verificationId, null);

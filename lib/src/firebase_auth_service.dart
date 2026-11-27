@@ -1,5 +1,6 @@
 import 'package:auth_engine/src/auth_error.dart';
 import 'package:auth_engine/src/auth_service.dart';
+import 'package:auth_engine/src/firebase_identity_gateway.dart';
 import 'package:firebase_auth/firebase_auth.dart' as fb show PhoneAuthCredential;
 import 'package:firebase_auth/firebase_auth.dart' hide PhoneAuthCredential;
 import 'package:firebase_messaging/firebase_messaging.dart';
@@ -11,8 +12,27 @@ import 'package:google_sign_in/google_sign_in.dart';
 Future<void>? _googleSignInReady;
 
 Future<GoogleSignIn> _googleSignIn() async {
-  await (_googleSignInReady ??= GoogleSignIn.instance.initialize());
+  try {
+    await (_googleSignInReady ??= GoogleSignIn.instance.initialize());
+  } catch (_) {
+    //* A failed start is not kept: the next attempt initializes again.
+    _googleSignInReady = null;
+    rethrow;
+  }
   return GoogleSignIn.instance;
+}
+
+/// What to undo when a step after a provider sign-in fails.
+enum SignInUndo {
+  /// A returning account: the sign-in created nothing, so only the session ends.
+  signOut,
+
+  /// A guest the sign-in linked: take the provider back off and keep the guest
+  /// (its uid, document and data).
+  unlink,
+
+  /// An account the sign-in created: remove it.
+  delete,
 }
 
 /// Firebase implementation of AbstractPhoneAuthCredential
@@ -81,44 +101,146 @@ class FirebaseAuthService<U> implements AuthService<User, U> {
         'providers=${current?.providerData.length} tokenSub=$tokenUid';
   }
 
-  Future<void> _cleanupTransientAuthUser(User authUser, {String? unlinkProviderId}) async {
+  /// What a failed step after the sign-in undoes, from what the provider
+  /// answered: [guestUid] is the guest the sign-in started from (a link keeps
+  /// its uid), [isNewUser] whether the sign-in created the account.
+  ///
+  //* Decided before any document is read. Judged from the document read, a
+  //* read that failed (a bad network) deleted a returning account, or the
+  //* guest that was just linked.
+  @visibleForTesting
+  static SignInUndo undoFor({required String uid, required String? guestUid, required bool isNewUser}) {
+    if (uid == guestUid) return SignInUndo.unlink;
+    return isNewUser ? SignInUndo.delete : SignInUndo.signOut;
+  }
+
+  Future<void> _undoSignIn(User authUser, SignInUndo undo, String providerId) async {
     if (_firebaseAuth.currentUser?.uid != authUser.uid) {
       return;
     }
 
-    //* A linked GUEST: take the provider back off and keep the guest session
-    //* (its uid, document and data). Deleting would sign the person out of the
-    //* only account they had.
-    if (unlinkProviderId != null) {
-      try {
-        await authUser.unlink(unlinkProviderId);
-        return;
-      } catch (error) {
-        _log('Unable to unlink $unlinkProviderId from guest ${authUser.uid}: $error');
-        return;
-      }
-    }
-
-    try {
-      await authUser.delete();
-    } catch (error) {
-      _log('Unable to delete transient auth user ${authUser.uid}: $error');
+    Future<void> signOut() async {
       try {
         await _firebaseAuth.signOut();
       } catch (signOutError) {
-        _log('Unable to sign out transient auth user ${authUser.uid}: $signOutError');
+        _log('Unable to sign out auth user ${authUser.uid}: $signOutError');
       }
+    }
+
+    switch (undo) {
+      case SignInUndo.unlink:
+        try {
+          await authUser.unlink(providerId);
+        } catch (error) {
+          _log('Unable to unlink $providerId from guest ${authUser.uid}: $error');
+        }
+      case SignInUndo.delete:
+        try {
+          await authUser.delete();
+        } catch (error) {
+          _log('Unable to delete transient auth user ${authUser.uid}: $error');
+          await signOut();
+        }
+      case SignInUndo.signOut:
+        await signOut();
+    }
+  }
+
+  /// A provider sign-in and what follows it, the same for every provider:
+  /// find the account's document (a returning account is done), refuse an
+  /// e-mail address or phone number another account holds, then create the
+  /// document or promote the guest's in place. Null when the provider gave
+  /// no user. A failure after the sign-in undoes what the sign-in itself did
+  /// ([undoFor]) and reaches the caller as an [AuthException].
+  Future<U?> _signInAndPersist({
+    required AuthFailureStep step,
+    required String providerId,
+    required Future<UserCredential> Function() signIn,
+    Future<void> Function(User user)? beforePersist,
+  }) async {
+    final current = _firebaseAuth.currentUser;
+    final guestUid = current != null && current.isAnonymous ? current.uid : null;
+    User? authUser;
+    var undo = SignInUndo.signOut;
+
+    Future<void> undoSignIn() async {
+      final user = authUser;
+      if (user != null) await _undoSignIn(user, undo, providerId);
+    }
+
+    try {
+      final userCredential = await signIn();
+
+      authUser = userCredential.user;
+      if (authUser == null) {
+        return null;
+      }
+      undo = undoFor(
+        uid: authUser.uid,
+        guestUid: guestUid,
+        isNewUser: userCredential.additionalUserInfo?.isNewUser ?? false,
+      );
+
+      /// See if we have a user with the same UID
+      final existingUidUser = await _accounts.getUser(authUser.uid);
+
+      //* A guest document under this uid is the linked GUEST (linking keeps
+      //* the uid): promote it below instead of returning it as-is. Returned
+      //* as-is, a guest signing up stayed ANONYMOUS: still a "guest" to the
+      //* auth engine, no onboarding, no e-mail on file.
+      if (_accounts.isReturning(existingUidUser)) {
+        return existingUidUser;
+      }
+
+      //* An e-mail address or phone number another account holds: we cannot
+      //* continue, because we do not know that this person owns it and we do
+      //* not want to take over someone else's account.
+      final phone = providerId == PhoneAuthProvider.PROVIDER_ID;
+      final identifier = phone ? authUser.phoneNumber : authUser.email;
+      if (identifier != null) {
+        final taken = phone
+            ? await _accounts.identifierTaken(phoneNumber: identifier)
+            : await _accounts.identifierTaken(email: identifier);
+        if (taken) {
+          throw AuthException(phone ? AuthError.phoneAlreadyInUse : AuthError.emailAlreadyInUse);
+        }
+      }
+
+      await beforePersist?.call(authUser);
+
+      /// Create the user document, or promote the existing guest doc in place
+      return await _persistNewUser(authUser);
+    } on FirebaseAuthException catch (e) {
+      _onFailure?.call(step, e);
+      await undoSignIn();
+      throw AuthException(e.authError);
+    } on AuthException {
+      await undoSignIn();
+      rethrow;
+    } catch (error, stackTrace) {
+      _onFailure?.call(step, error);
+      await undoSignIn();
+      //* Every caller in `AuthFlows` catches `on AuthException` only, so
+      //* rethrowing the raw error (a Firestore `unavailable` on a bad network,
+      //* say) escaped uncaught and left the state pinned on `Authenticating` —
+      //* a permanent spinner. Log it, then translate to the contract type.
+      await _logException('Auth flow failed', error, stackTrace);
+      throw const AuthException(AuthError.unknown);
+    }
+  }
+
+  /// Runs a call that talks to Firebase Auth and gives its failure as the
+  /// one type callers catch.
+  Future<T> _translated<T>(Future<T> Function() run) async {
+    try {
+      return await run();
+    } on FirebaseAuthException catch (e) {
+      throw AuthException(e.authError);
     }
   }
 
   @override
-  bool requiresEmailVerification(User user) {
-    final providerIds = user.providerData.map((provider) => provider.providerId).toSet();
-    final hasPasswordProvider = providerIds.contains('password');
-    final hasFederatedEmailProvider = providerIds.contains('google.com') || providerIds.contains('apple.com');
-
-    return user.email != null && hasPasswordProvider && !hasFederatedEmailProvider;
-  }
+  bool requiresEmailVerification(User user) => mustVerifyEmail(user);
 
   @override
   User? get currentUser {
@@ -169,85 +291,39 @@ class FirebaseAuthService<U> implements AuthService<User, U> {
   }
 
   @override
-  Future<U?> signInWithPhoneCredential({required String verificationId, required String smsCode}) async {
-    User? authUser;
-    var completed = false;
-    //* The guest this sign-in links onto (same uid after the link). A failure
-    //* then unlinks the phone instead of deleting the guest account with its
-    //* data. Taken from the uid, not from the
-    //* doc read, so a network failure on that read is covered too.
-    final current = _firebaseAuth.currentUser;
-    final guestUid = current != null && current.isAnonymous ? current.uid : null;
-    String? linkedGuestProvider;
-
-    try {
-      //* Like every other provider: a guest session LINKS, so the uid — and
-      //* what the guest was doing — survives. A plain sign-in here
-      //* switched uid and abandoned the guest's stack; the returning-account
-      //* case (credential already in use) still falls back to sign-in.
-      //* The web has no guest: it confirms the code sent by [verifyPhoneNumber].
-      final userCredential = kIsWeb
-          ? await _confirmWebPhone(verificationId, smsCode)
-          : await _signInOrUpgradeAnonymousWithCredential(
+  Future<U?> signInWithPhoneCredential({required String verificationId, required String smsCode}) {
+    //* Like every other provider: a guest session LINKS, so the uid — and
+    //* what the guest was doing — survives. A plain sign-in here
+    //* switched uid and abandoned the guest's stack; the returning-account
+    //* case (credential already in use) still falls back to sign-in.
+    //* The web has no guest: it confirms the code sent by [verifyPhoneNumber].
+    return _signInWithPhone(
+      () => kIsWeb
+          ? _confirmWebPhone(verificationId, smsCode)
+          : _signInOrUpgradeAnonymousWithCredential(
               PhoneAuthProvider.credential(verificationId: verificationId, smsCode: smsCode),
-            );
+            ),
+    );
+  }
 
-      authUser = userCredential.user;
-
-      if (authUser == null) {
-        throw AuthException(AuthError.unknown);
-      }
-      if (authUser.uid == guestUid) linkedGuestProvider = PhoneAuthProvider.PROVIDER_ID;
-
-      /// See if we have a user with the same UID
-      final existingUidUser = await _accounts.getUser(authUser.uid);
-
-      //* A guest document under this uid is the linked guest: promote it
-      //* below instead of returning it as-is.
-      if (_accounts.isReturning(existingUidUser)) {
-        completed = true;
-        return existingUidUser!;
-      }
-
-      /// See if we have a user with the same phone number
-      final phoneNumber = authUser.phoneNumber;
-      if (phoneNumber != null) {
-        //* Check if a user with this phone number already exists
-        //* If so, we cannot continue because we don't want to accidentally
-        //* take over someone else's account
-        final existingPhoneUser = await _accounts.identifierTaken(phoneNumber: phoneNumber);
-        if (existingPhoneUser) {
-          throw AuthException(AuthError.phoneAlreadyInUse);
-        }
-      }
-
-      /// Create the user document, or promote the existing guest doc in place
-      final addedUser = await _persistNewUser(authUser);
-      completed = true;
-      return addedUser;
-    } on FirebaseAuthException catch (e) {
-      _onFailure?.call(AuthFailureStep.login, e);
-      if (authUser != null && !completed) {
-        await _cleanupTransientAuthUser(authUser, unlinkProviderId: linkedGuestProvider);
-      }
-      throw AuthException(e.authError);
-    } on AuthException {
-      if (authUser != null && !completed) {
-        await _cleanupTransientAuthUser(authUser, unlinkProviderId: linkedGuestProvider);
-      }
-      rethrow;
-    } catch (error, stackTrace) {
-      _onFailure?.call(AuthFailureStep.login, error);
-      if (authUser != null && !completed) {
-        await _cleanupTransientAuthUser(authUser, unlinkProviderId: linkedGuestProvider);
-      }
-      //* Every caller in `AuthFlows` catches `on AuthException` only, so
-      //* rethrowing the raw error (a Firestore `unavailable` on a bad network,
-      //* say) escaped uncaught and left the state pinned on `Authenticating` —
-      //* a permanent spinner. Log it, then translate to the contract type.
-      await _logException('Auth flow failed', error, stackTrace);
+  @override
+  Future<U?> signInWithPhoneAuthCredential(AbstractPhoneAuthCredential credential) async {
+    if (credential is! FirebasePhoneAuthCredential) {
       throw const AuthException(AuthError.unknown);
     }
+    return _signInWithPhone(() => _signInOrUpgradeAnonymousWithCredential(credential.credential));
+  }
+
+  Future<U?> _signInWithPhone(Future<UserCredential> Function() signIn) async {
+    final user = await _signInAndPersist(
+      step: AuthFailureStep.login,
+      providerId: PhoneAuthProvider.PROVIDER_ID,
+      signIn: signIn,
+    );
+    if (user == null) {
+      throw const AuthException(AuthError.unknown);
+    }
+    return user;
   }
 
   @override
@@ -287,158 +363,19 @@ class FirebaseAuthService<U> implements AuthService<User, U> {
   Future<U?> signInWithGoogleCredential(AuthCredential credential) =>
       _signInWithGoogle(() => _signInOrUpgradeAnonymousWithCredential(credential));
 
-  Future<U?> _signInWithGoogle(Future<UserCredential> Function() signIn) async {
-    User? authUser;
-    var completed = false;
-    //* Set when the sign-in LINKED a guest (its ANONYMOUS doc sits under
-    //* this uid): a failure then undoes the link instead of deleting the
-    //* account — deleting would throw the guest's session and data away.
-    String? linkedGuestProvider;
-
-    try {
-      final userCredential = await signIn();
-
-      authUser = userCredential.user;
-
-      if (authUser == null) {
-        return null;
-      }
-
-      /// See if we have a user with the same UID
-      final existingUidUser = await _accounts.getUser(authUser.uid);
-
-      //* A guest document under this uid is the linked GUEST (linking keeps
-      //* the uid): promote it below instead of returning it as-is. Only the
-      //* phone path had this guard; a guest signing up with Google or Apple
-      //* stayed ANONYMOUS — still a "guest" to the auth engine, no
-      //* onboarding, no e-mail on file, and the ONBOARDING -> ACTIVE rule
-      //* could never pass.
-      if (_accounts.isReturning(existingUidUser)) {
-        completed = true;
-        return existingUidUser!;
-      }
-      if (existingUidUser != null) linkedGuestProvider = 'google.com';
-
-      /// See if we have a user with the same email, could be using a different auth provider
-      final email = authUser.email;
-      if (email != null) {
-        //* If we have a user with the same email, we cannot continue
-        //* because we don't know if the user owns that email address
-        //* and we don't want to accidentally take over someone else's account
-        //* So we throw an exception and let the app handle it
-        final existingEmailUser = await _accounts.identifierTaken(email: email);
-        if (existingEmailUser) {
-          throw AuthException(AuthError.emailAlreadyInUse);
-        }
-      }
-
-      /// Create the user document, or promote the existing guest doc in place
-      final addedUser = await _persistNewUser(authUser);
-      completed = true;
-      return addedUser;
-    } on FirebaseAuthException catch (e) {
-      _onFailure?.call(AuthFailureStep.signupGoogle, e);
-      if (authUser != null && !completed) {
-        await _cleanupTransientAuthUser(authUser, unlinkProviderId: linkedGuestProvider);
-      }
-      throw AuthException(e.authError);
-    } on AuthException {
-      if (authUser != null && !completed) {
-        await _cleanupTransientAuthUser(authUser, unlinkProviderId: linkedGuestProvider);
-      }
-      rethrow;
-    } catch (error, stackTrace) {
-      _onFailure?.call(AuthFailureStep.signupGoogle, error);
-      if (authUser != null && !completed) {
-        await _cleanupTransientAuthUser(authUser, unlinkProviderId: linkedGuestProvider);
-      }
-      //* Every caller in `AuthFlows` catches `on AuthException` only, so
-      //* rethrowing the raw error (a Firestore `unavailable` on a bad network,
-      //* say) escaped uncaught and left the state pinned on `Authenticating` —
-      //* a permanent spinner. Log it, then translate to the contract type.
-      await _logException('Auth flow failed', error, stackTrace);
-      throw const AuthException(AuthError.unknown);
-    }
-  }
+  Future<U?> _signInWithGoogle(Future<UserCredential> Function() signIn) =>
+      _signInAndPersist(step: AuthFailureStep.signupGoogle, providerId: 'google.com', signIn: signIn);
 
   @override
-  Future<U?> signInWithApple() async {
-    User? authUser;
-    var completed = false;
-    //* Set when the sign-in LINKED a guest (its ANONYMOUS doc sits under
-    //* this uid): a failure then undoes the link instead of deleting the
-    //* account — deleting would throw the guest's session and data away.
-    String? linkedGuestProvider;
-
-    try {
-      final appleProvider = AppleAuthProvider()
+  Future<U?> signInWithApple() => _signInAndPersist(
+    step: AuthFailureStep.signupApple,
+    providerId: 'apple.com',
+    signIn: () => _signInOrUpgradeAnonymousWithProvider(
+      AppleAuthProvider()
         ..addScope('email')
-        ..addScope('name');
-
-      final userCredential = await _signInOrUpgradeAnonymousWithProvider(appleProvider);
-
-      authUser = userCredential.user;
-
-      if (authUser == null) {
-        return null;
-      }
-
-      /// See if we have a user with the same UID
-      final existingUidUser = await _accounts.getUser(authUser.uid);
-
-      //* A guest document under this uid is the linked GUEST (linking keeps
-      //* the uid): promote it below instead of returning it as-is. Only the
-      //* phone path had this guard; a guest signing up with Google or Apple
-      //* stayed ANONYMOUS — still a "guest" to the auth engine, no
-      //* onboarding, no e-mail on file, and the ONBOARDING -> ACTIVE rule
-      //* could never pass.
-      if (_accounts.isReturning(existingUidUser)) {
-        completed = true;
-        return existingUidUser!;
-      }
-      if (existingUidUser != null) linkedGuestProvider = 'apple.com';
-
-      /// See if we have a user with the same email, could be using a different auth provider
-      final email = authUser.email;
-      if (email != null) {
-        //* If we have a user with the same email, we cannot continue
-        //* because we don't know if the user owns that email address
-        //* and we don't want to accidentally take over someone else's account
-        //* So we throw an exception and let the app handle it
-        final existingEmailUser = await _accounts.identifierTaken(email: email);
-        if (existingEmailUser) {
-          throw AuthException(AuthError.emailAlreadyInUse);
-        }
-      }
-
-      /// Create the user document, or promote the existing guest doc in place
-      final addedUser = await _persistNewUser(authUser);
-      completed = true;
-      return addedUser;
-    } on FirebaseAuthException catch (e) {
-      _onFailure?.call(AuthFailureStep.signupApple, e);
-      if (authUser != null && !completed) {
-        await _cleanupTransientAuthUser(authUser, unlinkProviderId: linkedGuestProvider);
-      }
-      throw AuthException(e.authError);
-    } on AuthException {
-      if (authUser != null && !completed) {
-        await _cleanupTransientAuthUser(authUser, unlinkProviderId: linkedGuestProvider);
-      }
-      rethrow;
-    } catch (error, stackTrace) {
-      _onFailure?.call(AuthFailureStep.signupApple, error);
-      if (authUser != null && !completed) {
-        await _cleanupTransientAuthUser(authUser, unlinkProviderId: linkedGuestProvider);
-      }
-      //* Every caller in `AuthFlows` catches `on AuthException` only, so
-      //* rethrowing the raw error (a Firestore `unavailable` on a bad network,
-      //* say) escaped uncaught and left the state pinned on `Authenticating` —
-      //* a permanent spinner. Log it, then translate to the contract type.
-      await _logException('Auth flow failed', error, stackTrace);
-      throw const AuthException(AuthError.unknown);
-    }
-  }
+        ..addScope('name'),
+    ),
+  );
 
   @override
   Future<U> createUserWithEmailAndPassword({required String email, required String password}) async {
@@ -453,60 +390,20 @@ class FirebaseAuthService<U> implements AuthService<User, U> {
       return await _upgradeAnonymousWithEmail(currentUser, email, password);
     }
 
-    User? authUser;
-    var completed = false;
-
-    try {
-      final userCredential = await _firebaseAuth.createUserWithEmailAndPassword(email: email, password: password);
-
-      authUser = userCredential.user;
-
-      if (authUser == null) {
-        throw AuthException(AuthError.unknown);
-      }
-
-      /// See if we have a user with the same email, could be using a different auth provider.
-      //* Check BEFORE sending the verification email so we don't spam a collision case.
-      final existingEmailUser = await _accounts.identifierTaken(email: email);
-      if (existingEmailUser) {
-        //* If we have a user with the same email, we cannot continue
-        //* because we don't know if the user owns that email address
-        //* and we don't want to accidentally take over someone else's account
-        //* So we throw an exception and let the app handle it
-        throw AuthException(AuthError.emailAlreadyInUse);
-      }
-
-      await _useAppLanguage();
-      await authUser.sendEmailVerification();
-
-      /// Create the user document, or promote the existing guest doc in place
-      final addedUser = await _persistNewUser(authUser);
-      completed = true;
-
-      return addedUser;
-    } on FirebaseAuthException catch (e) {
-      _onFailure?.call(AuthFailureStep.signupEmail, e);
-      if (authUser != null && !completed) {
-        await _cleanupTransientAuthUser(authUser);
-      }
-      throw AuthException(e.authError);
-    } on AuthException {
-      if (authUser != null && !completed) {
-        await _cleanupTransientAuthUser(authUser);
-      }
-      rethrow;
-    } catch (error, stackTrace) {
-      _onFailure?.call(AuthFailureStep.signupEmail, error);
-      if (authUser != null && !completed) {
-        await _cleanupTransientAuthUser(authUser);
-      }
-      //* Every caller in `AuthFlows` catches `on AuthException` only, so
-      //* rethrowing the raw error (a Firestore `unavailable` on a bad network,
-      //* say) escaped uncaught and left the state pinned on `Authenticating` —
-      //* a permanent spinner. Log it, then translate to the contract type.
-      await _logException('Auth flow failed', error, stackTrace);
+    final user = await _signInAndPersist(
+      step: AuthFailureStep.signupEmail,
+      providerId: EmailAuthProvider.PROVIDER_ID,
+      signIn: () => _firebaseAuth.createUserWithEmailAndPassword(email: email, password: password),
+      //* After the collision check, so a taken address gets no verification e-mail.
+      beforePersist: (authUser) async {
+        await _useAppLanguage();
+        await authUser.sendEmailVerification();
+      },
+    );
+    if (user == null) {
       throw const AuthException(AuthError.unknown);
     }
+    return user;
   }
 
   //* Convert the guest in place: link the OAuth credential to the anonymous
@@ -601,7 +498,7 @@ class FirebaseAuthService<U> implements AuthService<User, U> {
     } catch (error, stackTrace) {
       _onFailure?.call(AuthFailureStep.signupEmail, error);
       if (!completed) {
-        await _cleanupTransientAuthUser(linkedUser, unlinkProviderId: EmailAuthProvider.PROVIDER_ID);
+        await _undoSignIn(linkedUser, SignInUndo.unlink, EmailAuthProvider.PROVIDER_ID);
       }
       await _logException('Anonymous email upgrade failed', error, stackTrace);
       throw const AuthException(AuthError.unknown);
@@ -623,10 +520,10 @@ class FirebaseAuthService<U> implements AuthService<User, U> {
   }
 
   @override
-  Future<void> sendPasswordResetEmail({required String email}) async {
+  Future<void> sendPasswordResetEmail({required String email}) => _translated(() async {
     await _useAppLanguage();
     await _firebaseAuth.sendPasswordResetEmail(email: email);
-  }
+  });
 
   /// Auth's own e-mails (verify, password reset) follow the app's language;
   /// without it they fall back to the console default.
@@ -640,8 +537,11 @@ class FirebaseAuthService<U> implements AuthService<User, U> {
       throw AuthException(AuthError.invalidAuthUser);
     }
 
-    await _useAppLanguage();
-    await user.sendEmailVerification();
+    //* A second tap soon after the first answers `too-many-requests`.
+    await _translated(() async {
+      await _useAppLanguage();
+      await user.sendEmailVerification();
+    });
   }
 
   @override
@@ -654,9 +554,12 @@ class FirebaseAuthService<U> implements AuthService<User, U> {
 
     //* Rules may read `email_verified` from the ID token: refresh it first, so
     //* whatever the reload below sets off already writes with the new claim.
-    await user.getIdToken(true);
-    await user.reload();
-    return _firebaseAuth.currentUser?.emailVerified ?? false;
+    //* Offline both calls fail: the caller gets an [AuthException], not a raw one.
+    return _translated(() async {
+      await user.getIdToken(true);
+      await user.reload();
+      return _firebaseAuth.currentUser?.emailVerified ?? false;
+    });
   }
 
   @override
@@ -793,8 +696,8 @@ class FirebaseAuthService<U> implements AuthService<User, U> {
         await user.linkWithCredential(credential);
       }
     } on FirebaseAuthException catch (e) {
-      _onFailure?.call(AuthFailureStep.phoneLink, e);
       //* A phone linked meanwhile (another device, a stale providerData).
+      //* Any other failure is reported once, by the caller.
       if (e.code != 'provider-already-linked') rethrow;
       await user.updatePhoneNumber(credential);
     }

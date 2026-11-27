@@ -146,7 +146,7 @@ class AuthEngine {
     //* delivered.
     if (attempt < 2) {
       Future<void>.delayed(_profileRetryDelay, () {
-        if (_status.session.uid != forUid) return;
+        if (_disposed || _status.session.uid != forUid) return;
         if (_status.profile != null) return;
         _profiles.fetch(forUid).then((profile) => _profileArrived(forUid, profile)).catchError((Object retryError) {
           _profileFailed(forUid, retryError, attempt: attempt + 1);
@@ -220,7 +220,10 @@ class AuthEngine {
   // Effects
   // ---------------------------------------------------------------------------
 
-  void _followProfile() {
+  /// How often a dropped live subscription is opened again for one session.
+  static const _maxProfileResubscribes = 3;
+
+  void _followProfile({int resubscribe = 0}) {
     _profileSub?.cancel();
     _profileSub = null;
 
@@ -245,13 +248,22 @@ class AuthEngine {
       },
       onError: (Object _) {
         //* A dropped live subscription is not a reason to fail a session the
-        //* one-shot fetch already resolved.
+        //* one-shot fetch already resolved. But a stream that ended on an
+        //* error delivers nothing more (a denied read in the token rotation
+        //* right after sign-in), and a later change — onboarding to active —
+        //* would never arrive: open it again, a few times, each later.
+        if (resubscribe >= _maxProfileResubscribes) return;
+        Future<void>.delayed(_profileRetryDelay * (resubscribe + 1), () {
+          if (_disposed || _status.session.uid != uid) return;
+          _followProfile(resubscribe: resubscribe + 1);
+        });
       },
     );
   }
 
   /// The one standing invariant: the machine never rests without a session.
   void _superviseSession() {
+    if (_disposed) return;
     if (_status.session is! NoneSession) return;
     if (_status.busyFlows > 0) return; // An interactive flow owns this gap.
     if (_ensuringAnonymous) return;
@@ -333,6 +345,7 @@ class AuthEngine {
   bool _repairingGuestDoc = false;
 
   void _repairGuestDoc() {
+    if (_disposed) return;
     if (_status.session is! GuestSession) return;
     if (_status.profile != null) return;
     if (_ensuringAnonymous || _repairingGuestDoc) return;
@@ -343,7 +356,7 @@ class AuthEngine {
         .then((_) {
           //* The live stream delivers the document once it lands; a one-shot
           //* re-read covers a stream that was opened before it existed.
-          if (_status.session.uid == uid) _followProfile();
+          if (!_disposed && _status.session.uid == uid) _followProfile();
         })
         .catchError((Object _) {})
         .whenComplete(() => _repairingGuestDoc = false);

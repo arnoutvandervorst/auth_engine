@@ -44,6 +44,8 @@ extension FirebaseAuthExceptionExtension on FirebaseAuthException {
       "account-exists-with-different-credential" ||
       "email-already-in-use" => AuthError.emailAlreadyInUse,
       "auth/invalid-credential" || "invalid-credential" => AuthError.invalidCredential,
+      //* The person closed the provider's popup (web) or sheet (native): not a failure.
+      "popup-closed-by-user" || "cancelled-popup-request" || "canceled" || "web-context-canceled" => AuthError.cancel,
       _ => AuthError.unknown,
     };
   }

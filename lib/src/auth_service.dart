@@ -96,6 +96,11 @@ abstract interface class AuthService<T, U> {
   /// Signs in using an SMS verification code.
   Future<U?> signInWithPhoneCredential({required String verificationId, required String smsCode});
 
+  /// Signs in with a phone credential the provider handed over itself (the
+  /// Android instant/auto-verification path of [verifyPhoneNumber]): there
+  /// is no code to type.
+  Future<U?> signInWithPhoneAuthCredential(AbstractPhoneAuthCredential credential);
+
   /// Returns the provider IDs currently linked to the authenticated user (e.g. 'google.com', 'apple.com', 'password').
   List<String> get linkedProviderIds;
 

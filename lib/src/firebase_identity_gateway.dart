@@ -13,6 +13,14 @@ const kTokenReadTimeout = Duration(seconds: 5);
 /// in as a function: [ensureGuestDoc] asks that app's backend for the guest
 /// document, [onAnonymousSignInFailed] reports to that app's failure log.
 
+/// Whether [user] has an e-mail address the app must prove. Only a password
+/// account has one: Google and Apple verified theirs. The one rule the
+/// session and the auth service both answer from.
+bool mustVerifyEmail(fb.User user) {
+  final providers = user.providerData.map((info) => info.providerId).toSet();
+  return user.email != null && providers.contains('password') && !providers.contains('google.com') && !providers.contains('apple.com');
+}
+
 class FirebaseIdentityGateway implements IdentityGateway {
   final fb.FirebaseAuth _auth;
   final Future<void> Function() _ensureGuestDoc;
@@ -133,7 +141,6 @@ class FirebaseIdentityGateway implements IdentityGateway {
     if (user == null) return const NoneSession();
     if (user.isAnonymous) return GuestSession(uid: user.uid);
 
-    final providers = user.providerData.map((info) => info.providerId).toSet();
     final phone = user.phoneNumber;
 
     return AccountSession(
@@ -141,11 +148,7 @@ class FirebaseIdentityGateway implements IdentityGateway {
       impersonatedBy: impersonatedBy,
       email: user.email,
       emailVerified: user.emailVerified,
-      //* Only a password account has an address the app must prove; Google and
-      //* Apple verified theirs. Mirrors `requiresEmailVerification` in the
-      //* live auth service.
-      mustVerifyEmail:
-          user.email != null && providers.contains('password') && !providers.contains('google.com') && !providers.contains('apple.com'),
+      mustVerifyEmail: mustVerifyEmail(user),
       verifiedPhone: (phone == null || phone.isEmpty) ? null : phone,
     );
   }

@@ -32,7 +32,7 @@ dependencies:
   auth_engine:
     git:
       url: https://github.com/<owner>/auth_engine.git
-      ref: v0.3.3
+      ref: v0.4.0
 ```
 
 A fix here reaches an app when that app raises `ref`.

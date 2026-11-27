@@ -90,6 +90,9 @@ class FakeProfiles implements ProfileGateway {
 
   void push(Profile profile) => _live.add(profile);
 
+  /// The live stream reports an error to every subscriber.
+  void fail(Object error) => _live.addError(error);
+
   Future<void> close() => _live.close();
 }
 

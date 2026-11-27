@@ -27,8 +27,9 @@ class AuthFlowsCore<U> {
   final Future<void> Function() _onSessionEnded;
   final void Function(String message) _log;
 
-  /// Told the method of each interactive sign-in / sign-up (`email_password`,
-  /// `google`, `apple`), for the app's analytics. Never an e-mail or other PII.
+  /// Told the method of each interactive sign-in / sign-up that went through
+  /// (`email_password`, `google`, `apple`), for the app's analytics. Never an
+  /// e-mail or other PII.
   final void Function(String method)? _onLogin;
   final void Function(String method)? _onSignUp;
 
@@ -37,7 +38,7 @@ class AuthFlowsCore<U> {
   /// "settle on the next state" waits can never observe the previous state.
   final flowLoader = signal<int>(0, options: SignalOptions(name: 'AuthFlows.loader'));
 
-  /// The last flow failure, at legacy fidelity. Sticky until [clearError],
+  /// The last flow failure, at legacy fidelity. Sticky until
   /// [retry], or the next flow starts.
   final lastError = signal<AuthError?>(null, options: SignalOptions(name: 'AuthFlows.lastError'));
 
@@ -97,15 +98,22 @@ class AuthFlowsCore<U> {
   /// (the session supervisor must not interfere mid-flow), but a credential
   /// failure is caught INSIDE it — the engine never publishes an issue and
   /// neither [flowLoader] nor [lastError] move. Cancel is a silent no-op.
-  /// Success returns null; global navigation then follows from the engine's
-  /// own session/profile resolution, exactly as before.
-  Future<AuthError?> _localFlow(Future<void> Function() operation) async {
+  /// Success returns null (after [onSuccess]); global navigation then follows
+  /// from the engine's own session/profile resolution, exactly as before.
+  Future<AuthError?> _localFlow(Future<void> Function() operation, {void Function()? onSuccess}) async {
     return await _engine.runFlow<AuthError?>(() async {
       try {
         await operation();
+        onSuccess?.call();
         return null;
       } on AuthException catch (e) {
         return e.authError == AuthError.cancel ? null : e.authError;
+      } catch (error) {
+        //* Anything else (a plugin that failed to start) stays on the form
+        //* too. Left to the engine it flipped the global gate to failed while
+        //* the form was told the sign-in went through.
+        _log('Auth flow failed: $error');
+        return AuthError.unknown;
       }
     });
   }
@@ -113,8 +121,10 @@ class AuthFlowsCore<U> {
   /// Signs in a user with email and password credentials. Failure is
   /// form-local: the error is returned, the global gate never moves.
   Future<AuthError?> signInWithEmailAndPassword({required String email, required String password}) async {
-    _onLogin?.call('email_password');
-    return await _localFlow(() => _service.signInWithEmailAndPassword(email: email, password: password));
+    return await _localFlow(
+      () => _service.signInWithEmailAndPassword(email: email, password: password),
+      onSuccess: () => _onLogin?.call('email_password'),
+    );
   }
 
   /// Signs in anonymously. Normally the engine's supervisor does this on its
@@ -130,39 +140,55 @@ class AuthFlowsCore<U> {
   //* so the machinery that papered over `authStateChanges` staying silent is
   //* simply gone.
   Future<AuthError?> signInWithGoogle() async {
-    _onLogin?.call('google');
     return await _localFlow(() async {
       final user = await _service.signInWithGoogle();
       if (user == null) throw const AuthException(AuthError.cancel);
-    });
+    }, onSuccess: () => _onLogin?.call('google'));
   }
 
   /// Signs in a user using their Apple ID.
   Future<AuthError?> signInWithApple() async {
-    _onLogin?.call('apple');
     return await _localFlow(() async {
       final user = await _service.signInWithApple();
       if (user == null) throw const AuthException(AuthError.cancel);
-    });
+    }, onSuccess: () => _onLogin?.call('apple'));
   }
 
   /// Starts a phone-number verification, returning the verification id via
   /// [codeSent]. Stateless on purpose — no loader, exactly as before: this
   /// runs inside onboarding, and a loader here would flash over the stepper.
+  ///
+  /// [verificationCompleted]: Android verified the number without a code
+  /// (no [codeSent] follows then); sign in with [signInWithVerifiedPhone].
+  /// Exactly one of the three callbacks ends every call.
   Future<void> startPhoneVerification({
     required String phoneNumber,
     required void Function(String verificationId, int? resendToken) codeSent,
     required void Function(AuthError error) verificationFailed,
+    void Function(AbstractPhoneAuthCredential credential)? verificationCompleted,
   }) async {
     await _engine.runFlow(() async {
-      await _service.verifyPhoneNumber(
-        phoneNumber: phoneNumber,
-        codeSent: codeSent,
-        verificationCompleted: (_) {},
-        verificationFailed: (error) => verificationFailed(_phoneAuthErrorFor(error)),
-        codeAutoRetrievalTimeout: (_) {},
-      );
+      try {
+        await _service.verifyPhoneNumber(
+          phoneNumber: phoneNumber,
+          codeSent: codeSent,
+          verificationCompleted: (credential) => verificationCompleted?.call(credential),
+          verificationFailed: (error) => verificationFailed(_phoneAuthErrorFor(error)),
+          codeAutoRetrievalTimeout: (_) {},
+        );
+      } catch (error) {
+        //* A call that throws instead of answering: the form hears it, and the
+        //* global gate stays where it is.
+        _log('Phone verification failed to start: $error');
+        verificationFailed(AuthError.unknown);
+      }
     });
+  }
+
+  /// Signs in with the phone credential [startPhoneVerification] handed to
+  /// `verificationCompleted`. Failure is form-local.
+  Future<AuthError?> signInWithVerifiedPhone(AbstractPhoneAuthCredential credential) async {
+    return await _localFlow(() => _service.signInWithPhoneAuthCredential(credential));
   }
 
   /// Signs in with a phone verification id + SMS code. Failure is form-local.
@@ -215,8 +241,10 @@ class AuthFlowsCore<U> {
   /// form-local: the error is returned, the global gate never moves.
   Future<AuthError?> createUserWithEmailAndPassword({required String email, required String password}) async {
     //* No e-mail (or any PII) in analytics parameters — Google Analytics policy.
-    _onSignUp?.call('email_password');
-    return await _localFlow(() => _service.createUserWithEmailAndPassword(email: email, password: password));
+    return await _localFlow(
+      () => _service.createUserWithEmailAndPassword(email: email, password: password),
+      onSuccess: () => _onSignUp?.call('email_password'),
+    );
   }
 
   /// Signs out. The engine shows the loader between the sign-out and the
@@ -283,13 +311,8 @@ class AuthFlowsCore<U> {
     await _flow(() => _service.signInWithCustomToken(token));
   }
 
-  /// Clears a sticky error and re-resolves from wherever the session is.
-  Future<void> clearError() async {
-    lastError.value = null;
-    _engine.retry();
-  }
-
-  /// Recovers a session that never finished resolving, from the loading shell.
+  /// Clears a sticky error and re-resolves from wherever the session is: from
+  /// the error screen, or from a loading shell that never finished.
   Future<void> retry() async {
     lastError.value = null;
     _engine.retry();

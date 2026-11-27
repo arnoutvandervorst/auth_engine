@@ -54,10 +54,12 @@ class CredentialsStateCore {
     busy.value = true;
     try {
       final error = await flow();
-      authError.value = error;
+      //* A sign-in that went through often closes the page (and disposes this
+      //* state) while the flow still runs: no writes after dispose.
+      if (!authError.disposed) authError.value = error;
       return error == null;
     } finally {
-      busy.value = false;
+      if (!busy.disposed) busy.value = false;
     }
   }
 
